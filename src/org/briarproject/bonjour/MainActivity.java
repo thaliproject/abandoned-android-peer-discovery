@@ -1,5 +1,6 @@
 package org.briarproject.bonjour;
 
+import static android.net.wifi.p2p.WifiP2pManager.EXTRA_WIFI_P2P_DEVICE;
 import static android.net.wifi.p2p.WifiP2pManager.NO_SERVICE_REQUESTS;
 import static android.net.wifi.p2p.WifiP2pManager.WIFI_P2P_CONNECTION_CHANGED_ACTION;
 import static android.net.wifi.p2p.WifiP2pManager.WIFI_P2P_PEERS_CHANGED_ACTION;
@@ -15,10 +16,14 @@ import static android.widget.Toast.LENGTH_LONG;
 import java.io.IOException;
 import java.net.InetAddress;
 import java.net.InetSocketAddress;
+import java.net.NetworkInterface;
 import java.net.ServerSocket;
 import java.net.Socket;
+import java.net.SocketException;
 import java.net.UnknownHostException;
+import java.util.Collections;
 import java.util.HashMap;
+import java.util.List;
 import java.util.Map;
 import java.util.Map.Entry;
 import java.util.UUID;
@@ -71,7 +76,6 @@ public class MainActivity extends Activity implements OnClickListener {
 	private ImageButton refresh;
 
 	private WifiP2pManager p2p;
-	private WifiManager wifi;
 	private BluetoothAdapter bt;
 	private Channel channel;
 	private BroadcastReceiver receiver;
@@ -117,8 +121,7 @@ public class MainActivity extends Activity implements OnClickListener {
 		if(p2p == null) die("This device does not support Wi-Fi Direct");
 		channel = p2p.initialize(this, getMainLooper(), null);
 
-		wifi = (WifiManager) getSystemService(WIFI_SERVICE);
-		if(wifi != null) openWifiSocket();
+		openWifiSocket();
 
 		bt = BluetoothAdapter.getDefaultAdapter();
 		if(bt != null) {
@@ -136,9 +139,9 @@ public class MainActivity extends Activity implements OnClickListener {
 		peerListListener = new PeerListListener() {
 
 			public void onPeersAvailable(WifiP2pDeviceList peers) {
-				print("Discovered peers:");
+				Log.d(TAG, "Discovered peers:");
 				for(WifiP2pDevice peer : peers.getDeviceList())
-					print("\t" + deviceToString(peer));
+					Log.d(TAG, "\t" + deviceToString(peer));
 			}
 		};
 
@@ -147,7 +150,7 @@ public class MainActivity extends Activity implements OnClickListener {
 			public void onDnsSdServiceAvailable(String instanceName,
 					String serviceType, WifiP2pDevice device) {
 				Log.d(TAG, "Discovered service:");
-				Log.d(TAG, "\t" + instanceName + "\t" + serviceType);
+				Log.d(TAG, "\t" + instanceName + " " + serviceType);
 				Log.d(TAG, "\t" + deviceToString(device));
 			}
 		};
@@ -161,10 +164,12 @@ public class MainActivity extends Activity implements OnClickListener {
 				print("\t" + domain);
 				for(Entry<String, String> e : txtMap.entrySet())
 					print("\t" + e.getKey() + " = " + e.getValue());
-				String ip = txtMap.get("ip");
-				if(ip != null) connectByWifi(ip);
-				String bt = txtMap.get("bt");
-				if(bt != null) connectByBluetooth(bt);
+				if(domain.endsWith("." + SERVICE_TYPE + ".local.")) {
+					String ip = txtMap.get("ip");
+					if(ip != null) connectByWifi(ip);
+					String bt = txtMap.get("bt");
+					if(bt != null) connectByBluetooth(bt);
+				}
 			}
 		};
 
@@ -174,10 +179,10 @@ public class MainActivity extends Activity implements OnClickListener {
 
 		String instanceName = "foo";
 		Map<String, String> txtMap = new HashMap<String, String>();
-		String ipAddress = getLocalIpAddress();
-		if(ipAddress != null) txtMap.put("ip", ipAddress);
-		String btAddress = getLocalBluetoothAddress();
-		if(btAddress != null) txtMap.put("bt", btAddress);
+		InetAddress ipAddr = getLocalIpAddress();
+		if(ipAddr != null) txtMap.put("ip", ipAddressToString(ipAddr));
+		String btAddr = getLocalBluetoothAddress();
+		if(btAddr != null) txtMap.put("bt", btAddr);
 		serviceInfo = WifiP2pDnsSdServiceInfo.newInstance(instanceName,
 				SERVICE_TYPE, txtMap);
 
@@ -197,19 +202,20 @@ public class MainActivity extends Activity implements OnClickListener {
 		registerReceiver(receiver, filter);
 		output.setText("");
 		startDiscovery();
+		printLocalIpAddresses();
 	}
 
 	@Override
 	public void onPause() {
 		super.onPause();
 		unregisterReceiver(receiver);
-		stopDiscovery();
+		stopDiscovery(false);
 	}
 
 	@Override
 	public void onDestroy() {
 		super.onDestroy();
-		if(wifi != null) closeWifiSocket();
+		closeWifiSocket();
 		if(bt != null) {
 			closeBluetoothSocket();
 			disableBluetooth();
@@ -219,8 +225,8 @@ public class MainActivity extends Activity implements OnClickListener {
 	public void onClick(View view) {
 		if(view == refresh) {
 			output.setText("");
-			stopDiscovery();
-			startDiscovery();
+			stopDiscovery(true);
+			printLocalIpAddresses();
 		}
 	}
 
@@ -236,15 +242,42 @@ public class MainActivity extends Activity implements OnClickListener {
 	}
 
 	private String deviceToString(WifiP2pDevice device) {
-		return device.deviceName + "\t" + device.deviceAddress;
+		return device.deviceName + " " + device.deviceAddress;
 	}
 
-	private String ipIntToString(int ip) {
-		int b0 = ip & 0xFF;
-		int b1 = (ip >> 8) & 0xFF;
-		int b2 = (ip >> 16) & 0xFF;
-		int b3 = (ip >> 24) & 0xFF;
-		return b0 + "." + b1 + "." + b2 + "." + b3;
+	private void printLocalIpAddresses() {
+		List<NetworkInterface> ifaces;
+		try {
+			ifaces = Collections.list(NetworkInterface.getNetworkInterfaces());
+		} catch(SocketException e) {
+			Log.e(TAG, e.toString());
+			return;
+		}
+		for(NetworkInterface iface : ifaces) {
+			for(InetAddress addr : Collections.list(iface.getInetAddresses())) {
+				String desc = ipAddressToString(addr);
+				if(addr.isLoopbackAddress()) desc += " (loopback)";
+				if(addr.isLinkLocalAddress()) desc += " (link-local)";
+				if(addr.isSiteLocalAddress()) desc += " (site-local)";
+				if(addr.isMulticastAddress()) desc += " (multicast)";
+				print("Interface " + iface.getName() + ": " + desc);
+			}
+		}
+	}
+
+	private InetAddress getLocalIpAddress() {
+		WifiManager wifi = (WifiManager) getSystemService(WIFI_SERVICE);
+		if(wifi == null) return null;
+		WifiInfo info = wifi.getConnectionInfo();
+		if(info == null || info.getNetworkId() == -1) return null;
+		int ipInt = info.getIpAddress(); // What if it's an IPv6 address?
+		byte[] ip = ipIntToBytes(ipInt);
+		try {
+			return InetAddress.getByAddress(ip);
+		} catch(UnknownHostException e) {
+			Log.e(TAG, e.toString());
+			return null;
+		}
 	}
 
 	private byte[] ipIntToBytes(int ip) {
@@ -256,34 +289,40 @@ public class MainActivity extends Activity implements OnClickListener {
 		return b;
 	}
 
-	private String getLocalIpAddress() {
-		if(wifi == null) return null;
-		WifiInfo wifiInfo = wifi.getConnectionInfo();
-		if(wifiInfo == null) return null;
-		int ip = wifiInfo.getIpAddress();
-		if(ip == 0) return null;
-		return ipIntToString(ip);
+	private String ipAddressToString(InetAddress ip) {
+		return ip.getHostAddress().replaceFirst("%.*", "");
+	}
+
+	private boolean isValidIpAddress(String ip) {
+		boolean v4 = InetAddressUtils.isIPv4Address(ip);
+		boolean v6 = InetAddressUtils.isIPv6Address(ip);
+		if(!v4 && !v6) return false;
+		try {
+			InetAddress inet = InetAddress.getByName(ip);
+			return inet.isLinkLocalAddress() || inet.isSiteLocalAddress();
+		} catch(UnknownHostException e) {
+			Log.e(TAG, e.toString());
+			return false;
+		}
 	}
 
 	private void openWifiSocket() {
-		assert wifi != null;
-		WifiInfo wifiInfo = wifi.getConnectionInfo();
-		if(wifiInfo == null) return;
-		final byte[] ip = ipIntToBytes(wifiInfo.getIpAddress());
+		final InetAddress ip = getLocalIpAddress();
+		if(ip == null) return;
 		new Thread() {
 
 			@Override
 			public void run() {
 				try {
 					Log.d(TAG, "Opening wifi socket");
-					InetAddress inet = InetAddress.getByAddress(ip);
 					ServerSocket socket = new ServerSocket();
-					socket.bind(new InetSocketAddress(inet, PORT));
+					socket.bind(new InetSocketAddress(ip, PORT));
 					Log.d(TAG, "Wifi socket opened");
 					wifiSocket = socket;
 					while(true) {
 						Socket s = socket.accept();
-						final String addr = s.getInetAddress().getHostAddress();
+						InetAddress remoteIp = s.getInetAddress();
+						final String addr = ipAddressToString(remoteIp);
 						runOnUiThread(new Runnable() {
 							public void run() {
 								print("Incoming connection from " + addr);
@@ -320,9 +359,10 @@ public class MainActivity extends Activity implements OnClickListener {
 			public void run() {
 				try {
 					Socket s = new Socket(ip, PORT);
+					final String local = ipAddressToString(s.getLocalAddress());
 					runOnUiThread(new Runnable() {
 						public void run() {
-							print("Connected to " + ip);
+							print("Connected to " + ip + " from " + local);
 						}
 					});
 					s.close();
@@ -331,17 +371,6 @@ public class MainActivity extends Activity implements OnClickListener {
 				}
 			}
 		}.start();
-	}
-
-	private boolean isValidIpAddress(String ip) {
-		if(!InetAddressUtils.isIPv4Address(ip)) return false;
-		try {
-			InetAddress inet = InetAddress.getByName(ip);
-			return inet.isSiteLocalAddress();
-		} catch(UnknownHostException e) {
-			Log.e(TAG, e.toString());
-			return false;
-		}
 	}
 
 	private void enableBluetooth() {
@@ -433,8 +462,6 @@ public class MainActivity extends Activity implements OnClickListener {
 	private void startDiscovery() {
 		print("Starting discovery");
 		startPeerDiscovery();
-		addServiceRequest();
-		startServiceDiscovery();
 	}
 
 	private void startPeerDiscovery() {
@@ -442,6 +469,7 @@ public class MainActivity extends Activity implements OnClickListener {
 
 			public void onSuccess() {
 				Log.d(TAG, "Started peer discovery");
+				addServiceRequest();
 			}
 
 			public void onFailure(int reason) {
@@ -455,6 +483,7 @@ public class MainActivity extends Activity implements OnClickListener {
 
 			public void onSuccess() {
 				Log.d(TAG, "Added service request");
+				startServiceDiscovery();
 			}
 
 			public void onFailure(int reason) {
@@ -473,26 +502,23 @@ public class MainActivity extends Activity implements OnClickListener {
 			public void onFailure(int reason) {
 				print("Starting service discovery failed, error code "
 						+ reason);
-				if(reason == NO_SERVICE_REQUESTS) {
-					// http://p2feed.com/wifi-direct.html#bugs
-					stopDiscovery();
-					startDiscovery();
-				}
+				// http://p2feed.com/wifi-direct.html#bugs
+				if(reason == NO_SERVICE_REQUESTS) stopDiscovery(true);
 			}
 		});
 	}
 
-	private void stopDiscovery() {
+	private void stopDiscovery(boolean restart) {
 		print("Stopping discovery");
-		stopPeerDiscovery();
-		removeServiceRequest();
+		stopPeerDiscovery(restart);
 	}
 
-	private void stopPeerDiscovery() {
+	private void stopPeerDiscovery(final boolean restart) {
 		p2p.stopPeerDiscovery(channel, new ActionListener() {
 
 			public void onSuccess() {
 				Log.d(TAG, "Stopped peer discovery");
+				removeServiceRequest(restart);
 			}
 
 			public void onFailure(int reason) {
@@ -501,11 +527,12 @@ public class MainActivity extends Activity implements OnClickListener {
 		});
 	}
 
-	private void removeServiceRequest() {
+	private void removeServiceRequest(final boolean restart) {
 		p2p.removeServiceRequest(channel, serviceRequest, new ActionListener() {
 
 			public void onSuccess() {
 				Log.d(TAG, "Removed service request");
+				if(restart) startDiscovery();
 			}
 
 			public void onFailure(int reason) {
@@ -520,8 +547,13 @@ public class MainActivity extends Activity implements OnClickListener {
 		public void onReceive(Context context, Intent intent) {
 			String action = intent.getAction();
 			Log.d(TAG, "Received intent: " + action);
-			if(WIFI_P2P_PEERS_CHANGED_ACTION.equals(action))
+			if(WIFI_P2P_PEERS_CHANGED_ACTION.equals(action)) {
 				p2p.requestPeers(channel, peerListListener);
+			} else if(WIFI_P2P_THIS_DEVICE_CHANGED_ACTION.equals(action)) {
+				WifiP2pDevice device = intent.getParcelableExtra(
+						EXTRA_WIFI_P2P_DEVICE);
+				Log.d(TAG, "Local device: " + deviceToString(device));
+			}
 		}
 	}
 }
