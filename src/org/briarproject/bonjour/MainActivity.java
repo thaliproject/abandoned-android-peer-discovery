@@ -1,7 +1,6 @@
 package org.briarproject.bonjour;
 
 import static android.net.wifi.p2p.WifiP2pManager.EXTRA_WIFI_P2P_DEVICE;
-import static android.net.wifi.p2p.WifiP2pManager.NO_SERVICE_REQUESTS;
 import static android.net.wifi.p2p.WifiP2pManager.WIFI_P2P_CONNECTION_CHANGED_ACTION;
 import static android.net.wifi.p2p.WifiP2pManager.WIFI_P2P_PEERS_CHANGED_ACTION;
 import static android.net.wifi.p2p.WifiP2pManager.WIFI_P2P_STATE_CHANGED_ACTION;
@@ -52,6 +51,7 @@ import android.net.wifi.p2p.WifiP2pManager.PeerListListener;
 import android.net.wifi.p2p.nsd.WifiP2pDnsSdServiceInfo;
 import android.net.wifi.p2p.nsd.WifiP2pDnsSdServiceRequest;
 import android.os.Bundle;
+import android.os.Handler;
 import android.util.Log;
 import android.view.View;
 import android.view.View.OnClickListener;
@@ -83,7 +83,7 @@ public class MainActivity extends Activity implements OnClickListener {
 	private PeerListListener peerListListener;
 	private DnsSdTxtRecordListener txtListener;
 	private DnsSdServiceResponseListener serviceListener;
-	private WifiP2pDnsSdServiceRequest serviceRequest;
+
 	private WifiP2pDnsSdServiceInfo serviceInfo;
 
 	private boolean btWasEnabled = false;
@@ -175,8 +175,6 @@ public class MainActivity extends Activity implements OnClickListener {
 
 		p2p.setDnsSdResponseListeners(channel, serviceListener, txtListener);
 
-		serviceRequest = WifiP2pDnsSdServiceRequest.newInstance();
-
 		String instanceName = "foo";
 		Map<String, String> txtMap = new HashMap<String, String>();
 		InetAddress ipAddr = getLocalIpAddress();
@@ -186,22 +184,13 @@ public class MainActivity extends Activity implements OnClickListener {
 		serviceInfo = WifiP2pDnsSdServiceInfo.newInstance(instanceName,
 				SERVICE_TYPE, txtMap);
 
-		p2p.addLocalService(channel, serviceInfo, new ActionListener() {
-
-			public void onSuccess() {}
-
-			public void onFailure(int reason) {
-				print("Adding local service failed, error code " + reason);
-			}
-		});
+		startDiscovery();
 	}
 
 	@Override
 	public void onResume() {
 		super.onResume();
 		registerReceiver(receiver, filter);
-		output.setText("");
-		startDiscovery();
 		printLocalIpAddresses();
 	}
 
@@ -209,12 +198,12 @@ public class MainActivity extends Activity implements OnClickListener {
 	public void onPause() {
 		super.onPause();
 		unregisterReceiver(receiver);
-		stopDiscovery(false);
 	}
 
 	@Override
 	public void onDestroy() {
 		super.onDestroy();
+		stopDiscovery();
 		closeWifiSocket();
 		if(bt != null) {
 			closeBluetoothSocket();
@@ -223,11 +212,7 @@ public class MainActivity extends Activity implements OnClickListener {
 	}
 
 	public void onClick(View view) {
-		if(view == refresh) {
-			output.setText("");
-			stopDiscovery(true);
-			printLocalIpAddresses();
-		}
+		if(view == refresh) printLocalIpAddresses();
 	}
 
 	private void die(String text) {
@@ -253,6 +238,7 @@ public class MainActivity extends Activity implements OnClickListener {
 			Log.e(TAG, e.toString());
 			return;
 		}
+		print("Local IP addresses:");
 		for(NetworkInterface iface : ifaces) {
 			for(InetAddress addr : Collections.list(iface.getInetAddresses())) {
 				String desc = ipAddressToString(addr);
@@ -260,7 +246,7 @@ public class MainActivity extends Activity implements OnClickListener {
 				if(addr.isLinkLocalAddress()) desc += " (link-local)";
 				if(addr.isSiteLocalAddress()) desc += " (site-local)";
 				if(addr.isMulticastAddress()) desc += " (multicast)";
-				print("Interface " + iface.getName() + ": " + desc);
+				print("\t" + iface.getName() + ": " + desc);
 			}
 		}
 	}
@@ -461,7 +447,22 @@ public class MainActivity extends Activity implements OnClickListener {
 
 	private void startDiscovery() {
 		print("Starting discovery");
-		startPeerDiscovery();
+		addLocalService();
+	}
+
+	private void addLocalService() {
+		p2p.addLocalService(channel, serviceInfo, new ActionListener() {
+
+			public void onSuccess() {
+				Log.d(TAG, "Added local service");
+				startPeerDiscovery();
+			}
+
+			public void onFailure(int reason) {
+				print("Adding local service failed, error code " + reason);
+				startPeerDiscovery();
+			}
+		});
 	}
 
 	private void startPeerDiscovery() {
@@ -474,20 +475,32 @@ public class MainActivity extends Activity implements OnClickListener {
 
 			public void onFailure(int reason) {
 				print("Starting peer discovery failed, error code " + reason);
+				addServiceRequest();
 			}
 		});
 	}
 
 	private void addServiceRequest() {
-		p2p.addServiceRequest(channel, serviceRequest, new ActionListener() {
+		WifiP2pDnsSdServiceRequest request =
+				WifiP2pDnsSdServiceRequest.newInstance();
+		final Handler handler = new Handler();
+		p2p.addServiceRequest(channel, request, new ActionListener() {
 
 			public void onSuccess() {
 				Log.d(TAG, "Added service request");
-				startServiceDiscovery();
+				// Calling discoverServices() too soon can result in a
+				// NO_SERVICE_REQUESTS failure - looks like a race condition
+				// http://p2feed.com/wifi-direct.html#bugs
+				handler.postDelayed(new Runnable() {
+					public void run() {
+						startServiceDiscovery();
+					}
+				}, 1000);
 			}
 
 			public void onFailure(int reason) {
 				print("Adding service request failed, error code " + reason);
+				// No point starting service discovery
 			}
 		});
 	}
@@ -502,23 +515,21 @@ public class MainActivity extends Activity implements OnClickListener {
 			public void onFailure(int reason) {
 				print("Starting service discovery failed, error code "
 						+ reason);
-				// http://p2feed.com/wifi-direct.html#bugs
-				if(reason == NO_SERVICE_REQUESTS) stopDiscovery(true);
 			}
 		});
 	}
 
-	private void stopDiscovery(boolean restart) {
+	private void stopDiscovery() {
 		print("Stopping discovery");
-		stopPeerDiscovery(restart);
+		stopPeerDiscovery();
 	}
 
-	private void stopPeerDiscovery(final boolean restart) {
+	private void stopPeerDiscovery() {
 		p2p.stopPeerDiscovery(channel, new ActionListener() {
 
 			public void onSuccess() {
 				Log.d(TAG, "Stopped peer discovery");
-				removeServiceRequest(restart);
+				clearServiceRequests();
 			}
 
 			public void onFailure(int reason) {
@@ -527,16 +538,29 @@ public class MainActivity extends Activity implements OnClickListener {
 		});
 	}
 
-	private void removeServiceRequest(final boolean restart) {
-		p2p.removeServiceRequest(channel, serviceRequest, new ActionListener() {
+	private void clearServiceRequests() {
+		p2p.clearServiceRequests(channel, new ActionListener() {
 
 			public void onSuccess() {
-				Log.d(TAG, "Removed service request");
-				if(restart) startDiscovery();
+				Log.d(TAG, "Cleared service requests");
+				clearLocalServices();
 			}
 
 			public void onFailure(int reason) {
-				print("Removing service request failed, error code " + reason);
+				print("Clearing service requests failed, error code " + reason);
+			}
+		});
+	}
+
+	private void clearLocalServices() {
+		p2p.clearLocalServices(channel, new ActionListener() {
+
+			public void onSuccess() {
+				Log.d(TAG, "Cleared local services");
+			}
+
+			public void onFailure(int reason) {
+				print("Clearing local services failed, error code " + reason);
 			}
 		});
 	}
